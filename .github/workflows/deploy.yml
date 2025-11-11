@@ -1,0 +1,733 @@
+name: Deploy to ECR and Update Helm Charts
+
+on:
+  push:
+    branches:
+      - gitops
+    paths:
+      - 'src/**'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      build_ui: ${{ steps.changes.outputs.build_ui }}
+      build_catalog: ${{ steps.changes.outputs.build_catalog }}
+      build_cart: ${{ steps.changes.outputs.build_cart }}
+      build_checkout: ${{ steps.changes.outputs.build_checkout }}
+      build_orders: ${{ steps.changes.outputs.build_orders }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Detect changed services
+        id: changes
+        run: |
+          # Check if workflow was triggered manually
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "Manual trigger detected - building all services"
+            echo "build_ui=true" >> $GITHUB_OUTPUT
+            echo "build_catalog=true" >> $GITHUB_OUTPUT
+            echo "build_cart=true" >> $GITHUB_OUTPUT
+            echo "build_checkout=true" >> $GITHUB_OUTPUT
+            echo "build_orders=true" >> $GITHUB_OUTPUT
+          else
+            echo "Detecting changes from previous commit..."
+            CHANGED_FILES=$(git diff --name-only HEAD^ HEAD)
+            
+            # Check each service directory for changes
+            if echo "$CHANGED_FILES" | grep -q "^src/ui/"; then
+              echo "build_ui=true" >> $GITHUB_OUTPUT
+              echo "✓ UI service has changes"
+            else
+              echo "build_ui=false" >> $GITHUB_OUTPUT
+              echo "✗ UI service has no changes"
+            fi
+            
+            if echo "$CHANGED_FILES" | grep -q "^src/catalog/"; then
+              echo "build_catalog=true" >> $GITHUB_OUTPUT
+              echo "✓ Catalog service has changes"
+            else
+              echo "build_catalog=false" >> $GITHUB_OUTPUT
+              echo "✗ Catalog service has no changes"
+            fi
+            
+            if echo "$CHANGED_FILES" | grep -q "^src/cart/"; then
+              echo "build_cart=true" >> $GITHUB_OUTPUT
+              echo "✓ Cart service has changes"
+            else
+              echo "build_cart=false" >> $GITHUB_OUTPUT
+              echo "✗ Cart service has no changes"
+            fi
+            
+            if echo "$CHANGED_FILES" | grep -q "^src/checkout/"; then
+              echo "build_checkout=true" >> $GITHUB_OUTPUT
+              echo "✓ Checkout service has changes"
+            else
+              echo "build_checkout=false" >> $GITHUB_OUTPUT
+              echo "✗ Checkout service has no changes"
+            fi
+            
+            if echo "$CHANGED_FILES" | grep -q "^src/orders/"; then
+              echo "build_orders=true" >> $GITHUB_OUTPUT
+              echo "✓ Orders service has changes"
+            else
+              echo "build_orders=false" >> $GITHUB_OUTPUT
+              echo "✗ Orders service has no changes"
+            fi
+          fi
+
+  build-ui:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.build_ui == 'true'
+    steps:
+      - name: Checkout source code for UI service
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials for ECR access
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Authenticate with Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Ensure ECR repository exists for UI service
+        run: |
+          echo "Checking if ECR repository 'retail-store-ui' exists..."
+          if aws ecr describe-repositories --repository-names retail-store-ui --region ${{ secrets.AWS_REGION }} 2>/dev/null; then
+            echo "✓ ECR repository 'retail-store-ui' already exists"
+          else
+            echo "Creating ECR repository 'retail-store-ui'..."
+            if aws ecr create-repository --repository-name retail-store-ui --region ${{ secrets.AWS_REGION }}; then
+              echo "✓ Successfully created ECR repository 'retail-store-ui'"
+            else
+              echo "✗ ERROR: Failed to create ECR repository 'retail-store-ui'"
+              exit 1
+            fi
+          fi
+      
+      - name: Build and push UI service Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          set -e  # Exit on any error
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          IMAGE_URI="$ECR_REGISTRY/retail-store-ui:$SHORT_SHA"
+          
+          echo "=========================================="
+          echo "Building UI Service Docker Image"
+          echo "=========================================="
+          echo "Image URI: $IMAGE_URI"
+          echo "Build Context: src/ui"
+          echo "Commit SHA: ${{ github.sha }}"
+          echo "Short SHA: $SHORT_SHA"
+          echo "=========================================="
+          
+          # Build Docker image with progress output
+          if docker build --progress=plain -t "$IMAGE_URI" src/ui; then
+            echo "✓ Successfully built Docker image for UI service"
+          else
+            echo "✗ ERROR: Docker build failed for UI service"
+            echo "Build context: src/ui"
+            echo "Image tag: $IMAGE_URI"
+            exit 1
+          fi
+          
+          echo ""
+          echo "=========================================="
+          echo "Pushing UI Service Image to ECR"
+          echo "=========================================="
+          
+          # Push Docker image to ECR
+          if docker push "$IMAGE_URI"; then
+            echo "✓ Successfully pushed image to ECR"
+            echo "Image URI: $IMAGE_URI"
+            echo "Registry: $ECR_REGISTRY"
+            echo "Repository: retail-store-ui"
+            echo "Tag: $SHORT_SHA"
+          else
+            echo "✗ ERROR: Failed to push Docker image to ECR"
+            echo "Image URI: $IMAGE_URI"
+            exit 1
+          fi
+          
+          echo "=========================================="
+
+  build-catalog:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.build_catalog == 'true'
+    steps:
+      - name: Checkout source code for Catalog service
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials for ECR access
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Authenticate with Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Ensure ECR repository exists for Catalog service
+        run: |
+          echo "Checking if ECR repository 'retail-store-catalog' exists..."
+          if aws ecr describe-repositories --repository-names retail-store-catalog --region ${{ secrets.AWS_REGION }} 2>/dev/null; then
+            echo "✓ ECR repository 'retail-store-catalog' already exists"
+          else
+            echo "Creating ECR repository 'retail-store-catalog'..."
+            if aws ecr create-repository --repository-name retail-store-catalog --region ${{ secrets.AWS_REGION }}; then
+              echo "✓ Successfully created ECR repository 'retail-store-catalog'"
+            else
+              echo "✗ ERROR: Failed to create ECR repository 'retail-store-catalog'"
+              exit 1
+            fi
+          fi
+      
+      - name: Build and push Catalog service Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          set -e  # Exit on any error
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          IMAGE_URI="$ECR_REGISTRY/retail-store-catalog:$SHORT_SHA"
+          
+          echo "=========================================="
+          echo "Building Catalog Service Docker Image"
+          echo "=========================================="
+          echo "Image URI: $IMAGE_URI"
+          echo "Build Context: src/catalog"
+          echo "Commit SHA: ${{ github.sha }}"
+          echo "Short SHA: $SHORT_SHA"
+          echo "=========================================="
+          
+          # Build Docker image with progress output
+          if docker build --progress=plain -t "$IMAGE_URI" src/catalog; then
+            echo "✓ Successfully built Docker image for Catalog service"
+          else
+            echo "✗ ERROR: Docker build failed for Catalog service"
+            echo "Build context: src/catalog"
+            echo "Image tag: $IMAGE_URI"
+            exit 1
+          fi
+          
+          echo ""
+          echo "=========================================="
+          echo "Pushing Catalog Service Image to ECR"
+          echo "=========================================="
+          
+          # Push Docker image to ECR
+          if docker push "$IMAGE_URI"; then
+            echo "✓ Successfully pushed image to ECR"
+            echo "Image URI: $IMAGE_URI"
+            echo "Registry: $ECR_REGISTRY"
+            echo "Repository: retail-store-catalog"
+            echo "Tag: $SHORT_SHA"
+          else
+            echo "✗ ERROR: Failed to push Docker image to ECR"
+            echo "Image URI: $IMAGE_URI"
+            exit 1
+          fi
+          
+          echo "=========================================="
+
+  build-cart:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.build_cart == 'true'
+    steps:
+      - name: Checkout source code for Cart service
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials for ECR access
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Authenticate with Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Ensure ECR repository exists for Cart service
+        run: |
+          echo "Checking if ECR repository 'retail-store-cart' exists..."
+          if aws ecr describe-repositories --repository-names retail-store-cart --region ${{ secrets.AWS_REGION }} 2>/dev/null; then
+            echo "✓ ECR repository 'retail-store-cart' already exists"
+          else
+            echo "Creating ECR repository 'retail-store-cart'..."
+            if aws ecr create-repository --repository-name retail-store-cart --region ${{ secrets.AWS_REGION }}; then
+              echo "✓ Successfully created ECR repository 'retail-store-cart'"
+            else
+              echo "✗ ERROR: Failed to create ECR repository 'retail-store-cart'"
+              exit 1
+            fi
+          fi
+      
+      - name: Build and push Cart service Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          set -e  # Exit on any error
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          IMAGE_URI="$ECR_REGISTRY/retail-store-cart:$SHORT_SHA"
+          
+          echo "=========================================="
+          echo "Building Cart Service Docker Image"
+          echo "=========================================="
+          echo "Image URI: $IMAGE_URI"
+          echo "Build Context: src/cart"
+          echo "Commit SHA: ${{ github.sha }}"
+          echo "Short SHA: $SHORT_SHA"
+          echo "=========================================="
+          
+          # Build Docker image with progress output
+          if docker build --progress=plain -t "$IMAGE_URI" src/cart; then
+            echo "✓ Successfully built Docker image for Cart service"
+          else
+            echo "✗ ERROR: Docker build failed for Cart service"
+            echo "Build context: src/cart"
+            echo "Image tag: $IMAGE_URI"
+            exit 1
+          fi
+          
+          echo ""
+          echo "=========================================="
+          echo "Pushing Cart Service Image to ECR"
+          echo "=========================================="
+          
+          # Push Docker image to ECR
+          if docker push "$IMAGE_URI"; then
+            echo "✓ Successfully pushed image to ECR"
+            echo "Image URI: $IMAGE_URI"
+            echo "Registry: $ECR_REGISTRY"
+            echo "Repository: retail-store-cart"
+            echo "Tag: $SHORT_SHA"
+          else
+            echo "✗ ERROR: Failed to push Docker image to ECR"
+            echo "Image URI: $IMAGE_URI"
+            exit 1
+          fi
+          
+          echo "=========================================="
+
+  build-checkout:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.build_checkout == 'true'
+    steps:
+      - name: Checkout source code for Checkout service
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials for ECR access
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Authenticate with Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Ensure ECR repository exists for Checkout service
+        run: |
+          echo "Checking if ECR repository 'retail-store-checkout' exists..."
+          if aws ecr describe-repositories --repository-names retail-store-checkout --region ${{ secrets.AWS_REGION }} 2>/dev/null; then
+            echo "✓ ECR repository 'retail-store-checkout' already exists"
+          else
+            echo "Creating ECR repository 'retail-store-checkout'..."
+            if aws ecr create-repository --repository-name retail-store-checkout --region ${{ secrets.AWS_REGION }}; then
+              echo "✓ Successfully created ECR repository 'retail-store-checkout'"
+            else
+              echo "✗ ERROR: Failed to create ECR repository 'retail-store-checkout'"
+              exit 1
+            fi
+          fi
+      
+      - name: Build and push Checkout service Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          set -e  # Exit on any error
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          IMAGE_URI="$ECR_REGISTRY/retail-store-checkout:$SHORT_SHA"
+          
+          echo "=========================================="
+          echo "Building Checkout Service Docker Image"
+          echo "=========================================="
+          echo "Image URI: $IMAGE_URI"
+          echo "Build Context: src/checkout"
+          echo "Commit SHA: ${{ github.sha }}"
+          echo "Short SHA: $SHORT_SHA"
+          echo "=========================================="
+          
+          # Build Docker image with progress output
+          if docker build --progress=plain -t "$IMAGE_URI" src/checkout; then
+            echo "✓ Successfully built Docker image for Checkout service"
+          else
+            echo "✗ ERROR: Docker build failed for Checkout service"
+            echo "Build context: src/checkout"
+            echo "Image tag: $IMAGE_URI"
+            exit 1
+          fi
+          
+          echo ""
+          echo "=========================================="
+          echo "Pushing Checkout Service Image to ECR"
+          echo "=========================================="
+          
+          # Push Docker image to ECR
+          if docker push "$IMAGE_URI"; then
+            echo "✓ Successfully pushed image to ECR"
+            echo "Image URI: $IMAGE_URI"
+            echo "Registry: $ECR_REGISTRY"
+            echo "Repository: retail-store-checkout"
+            echo "Tag: $SHORT_SHA"
+          else
+            echo "✗ ERROR: Failed to push Docker image to ECR"
+            echo "Image URI: $IMAGE_URI"
+            exit 1
+          fi
+          
+          echo "=========================================="
+
+  build-orders:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.build_orders == 'true'
+    steps:
+      - name: Checkout source code for Orders service
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials for ECR access
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Authenticate with Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Ensure ECR repository exists for Orders service
+        run: |
+          echo "Checking if ECR repository 'retail-store-orders' exists..."
+          if aws ecr describe-repositories --repository-names retail-store-orders --region ${{ secrets.AWS_REGION }} 2>/dev/null; then
+            echo "✓ ECR repository 'retail-store-orders' already exists"
+          else
+            echo "Creating ECR repository 'retail-store-orders'..."
+            if aws ecr create-repository --repository-name retail-store-orders --region ${{ secrets.AWS_REGION }}; then
+              echo "✓ Successfully created ECR repository 'retail-store-orders'"
+            else
+              echo "✗ ERROR: Failed to create ECR repository 'retail-store-orders'"
+              exit 1
+            fi
+          fi
+      
+      - name: Build and push Orders service Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          set -e  # Exit on any error
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          IMAGE_URI="$ECR_REGISTRY/retail-store-orders:$SHORT_SHA"
+          
+          echo "=========================================="
+          echo "Building Orders Service Docker Image"
+          echo "=========================================="
+          echo "Image URI: $IMAGE_URI"
+          echo "Build Context: src/orders"
+          echo "Commit SHA: ${{ github.sha }}"
+          echo "Short SHA: $SHORT_SHA"
+          echo "=========================================="
+          
+          # Build Docker image with progress output
+          if docker build --progress=plain -t "$IMAGE_URI" src/orders; then
+            echo "✓ Successfully built Docker image for Orders service"
+          else
+            echo "✗ ERROR: Docker build failed for Orders service"
+            echo "Build context: src/orders"
+            echo "Image tag: $IMAGE_URI"
+            exit 1
+          fi
+          
+          echo ""
+          echo "=========================================="
+          echo "Pushing Orders Service Image to ECR"
+          echo "=========================================="
+          
+          # Push Docker image to ECR
+          if docker push "$IMAGE_URI"; then
+            echo "✓ Successfully pushed image to ECR"
+            echo "Image URI: $IMAGE_URI"
+            echo "Registry: $ECR_REGISTRY"
+            echo "Repository: retail-store-orders"
+            echo "Tag: $SHORT_SHA"
+          else
+            echo "✗ ERROR: Failed to push Docker image to ECR"
+            echo "Image URI: $IMAGE_URI"
+            exit 1
+          fi
+          
+          echo "=========================================="
+
+  update-helm-charts:
+    runs-on: ubuntu-latest
+    needs: [detect-changes, build-ui, build-catalog, build-cart, build-checkout, build-orders]
+    if: always() && (needs.build-ui.result == 'success' || needs.build-catalog.result == 'success' || needs.build-cart.result == 'success' || needs.build-checkout.result == 'success' || needs.build-orders.result == 'success')
+    steps:
+      - name: Checkout repository for Helm chart updates
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      
+      - name: Update Helm chart values with new image tags
+        run: |
+          set -e  # Exit on any error
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com"
+          
+          echo "=========================================="
+          echo "Helm Chart Update Process"
+          echo "=========================================="
+          echo "Commit SHA: ${{ github.sha }}"
+          echo "Short SHA: $SHORT_SHA"
+          echo "ECR Registry: $ECR_REGISTRY"
+          echo "=========================================="
+          echo ""
+          
+          # Track successful updates
+          UPDATED_SERVICES=()
+          
+          # Function to update values.yaml
+          update_values() {
+            local service=$1
+            local values_file="src/$service/chart/values.yaml"
+            
+            echo "Processing $service service..."
+            
+            if [ ! -f "$values_file" ]; then
+              echo "✗ ERROR: Helm values file not found: $values_file"
+              echo "Expected location: $values_file"
+              return 1
+            fi
+            
+            echo "  Found values file: $values_file"
+            
+            # Backup original file
+            cp "$values_file" "$values_file.backup"
+            
+            # Update only the main image section, preserve infrastructure images
+            if awk -v repo="$ECR_REGISTRY/retail-store-$service" -v tag="$SHORT_SHA" '
+            BEGIN { in_main_image = 0; updated_repo = 0; updated_tag = 0 }
+            /^image:/ { in_main_image = 1 }
+            in_main_image && /^  repository:/ && !updated_repo {
+              print "  repository: " repo
+              updated_repo = 1
+              next
+            }
+            in_main_image && /^  tag:/ && !updated_tag {
+              print "  tag: \"" tag "\""
+              updated_tag = 1
+              next
+            }
+            /^[a-zA-Z]/ && !/^image:/ { in_main_image = 0 }
+            { print }
+            ' "$values_file" > "$values_file.tmp"; then
+              mv "$values_file.tmp" "$values_file"
+              rm "$values_file.backup"
+              echo "✓ Successfully updated $values_file"
+              echo "  New image: $ECR_REGISTRY/retail-store-$service:$SHORT_SHA"
+              UPDATED_SERVICES+=("$service")
+            else
+              echo "✗ ERROR: Failed to update $values_file with AWK"
+              mv "$values_file.backup" "$values_file"
+              return 1
+            fi
+          }
+          
+          # Update each service if it was built successfully
+          echo "Checking build results and updating Helm charts..."
+          echo ""
+          
+          if [ "${{ needs.build-ui.result }}" == "success" ]; then
+            echo "[1/5] UI service build succeeded"
+            update_values "ui" || echo "⚠ Warning: Failed to update UI Helm chart"
+            echo ""
+          else
+            echo "[1/5] UI service build skipped or failed (status: ${{ needs.build-ui.result }})"
+            echo ""
+          fi
+          
+          if [ "${{ needs.build-catalog.result }}" == "success" ]; then
+            echo "[2/5] Catalog service build succeeded"
+            update_values "catalog" || echo "⚠ Warning: Failed to update Catalog Helm chart"
+            echo ""
+          else
+            echo "[2/5] Catalog service build skipped or failed (status: ${{ needs.build-catalog.result }})"
+            echo ""
+          fi
+          
+          if [ "${{ needs.build-cart.result }}" == "success" ]; then
+            echo "[3/5] Cart service build succeeded"
+            update_values "cart" || echo "⚠ Warning: Failed to update Cart Helm chart"
+            echo ""
+          else
+            echo "[3/5] Cart service build skipped or failed (status: ${{ needs.build-cart.result }})"
+            echo ""
+          fi
+          
+          if [ "${{ needs.build-checkout.result }}" == "success" ]; then
+            echo "[4/5] Checkout service build succeeded"
+            update_values "checkout" || echo "⚠ Warning: Failed to update Checkout Helm chart"
+            echo ""
+          else
+            echo "[4/5] Checkout service build skipped or failed (status: ${{ needs.build-checkout.result }})"
+            echo ""
+          fi
+          
+          if [ "${{ needs.build-orders.result }}" == "success" ]; then
+            echo "[5/5] Orders service build succeeded"
+            update_values "orders" || echo "⚠ Warning: Failed to update Orders Helm chart"
+            echo ""
+          else
+            echo "[5/5] Orders service build skipped or failed (status: ${{ needs.build-orders.result }})"
+            echo ""
+          fi
+          
+          echo "=========================================="
+          echo "Helm Chart Update Summary"
+          echo "=========================================="
+          if [ ${#UPDATED_SERVICES[@]} -eq 0 ]; then
+            echo "⚠ No Helm charts were updated"
+          else
+            echo "✓ Successfully updated ${#UPDATED_SERVICES[@]} Helm chart(s):"
+            for service in "${UPDATED_SERVICES[@]}"; do
+              echo "  - $service"
+            done
+          fi
+          echo "=========================================="
+      
+      - name: Commit and push Helm chart changes to repository
+        run: |
+          set -e  # Exit on any error
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          
+          echo "=========================================="
+          echo "Git Commit and Push Process"
+          echo "=========================================="
+          
+          # Configure Git user identity
+          echo "Configuring Git user identity..."
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "✓ Git user configured as github-actions[bot]"
+          echo ""
+          
+          # Add all modified values.yaml files to staging area
+          echo "Staging modified Helm values files..."
+          git add src/*/chart/values.yaml
+          
+          # Show what files are staged
+          echo "Staged files:"
+          git diff --staged --name-only | while read file; do
+            echo "  - $file"
+          done
+          echo ""
+          
+          # Check if there are any changes to commit
+          if git diff --staged --quiet; then
+            echo "=========================================="
+            echo "No changes to commit"
+            echo "=========================================="
+            echo "All Helm values.yaml files are already up to date"
+            echo "This may occur if:"
+            echo "  - The images were already at the specified tag"
+            echo "  - No services were successfully built"
+            exit 0
+          fi
+          
+          # Create commit with descriptive message
+          COMMIT_MSG="Update Helm charts with images from commit ${SHORT_SHA}"
+          echo "Creating commit..."
+          echo "Commit message: $COMMIT_MSG"
+          
+          if git commit -m "$COMMIT_MSG"; then
+            echo "✓ Successfully created commit"
+            
+            # Show commit details
+            echo ""
+            echo "Commit details:"
+            git log -1 --stat
+          else
+            echo "✗ ERROR: Failed to create commit"
+            exit 1
+          fi
+          
+          echo ""
+          echo "=========================================="
+          echo "Pushing changes to gitops branch..."
+          echo "=========================================="
+          
+          # Push changes to gitops branch with error handling
+          if git push origin HEAD:gitops; then
+            echo "✓ Successfully pushed changes to gitops branch"
+            echo ""
+            echo "Deployment process complete!"
+            echo "ArgoCD will detect these changes and sync the applications"
+          else
+            echo "✗ ERROR: Failed to push changes to gitops branch"
+            echo ""
+            echo "Attempting to resolve with rebase..."
+            
+            # Pull with rebase to handle any conflicts
+            if git pull --rebase origin gitops; then
+              echo "✓ Successfully rebased with remote changes"
+              
+              # Retry push
+              echo "Retrying push..."
+              if git push origin HEAD:gitops; then
+                echo "✓ Successfully pushed changes after rebase"
+                echo ""
+                echo "Deployment process complete!"
+                echo "ArgoCD will detect these changes and sync the applications"
+              else
+                echo "✗ ERROR: Failed to push changes after rebase"
+                echo ""
+                echo "Possible causes:"
+                echo "  - Branch protection rules preventing push"
+                echo "  - Insufficient permissions for GITHUB_TOKEN"
+                echo "  - Network connectivity issues"
+                echo ""
+                echo "Please check the workflow logs and repository settings"
+                exit 1
+              fi
+            else
+              echo "✗ ERROR: Failed to rebase with remote changes"
+              echo ""
+              echo "There may be conflicts that require manual resolution"
+              echo "Please check the repository state and resolve conflicts manually"
+              exit 1
+            fi
+          fi
+          
+          echo "=========================================="
